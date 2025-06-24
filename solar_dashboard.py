@@ -624,27 +624,25 @@ def main():
     # Initialize session state
     if 'selected_site' not in st.session_state:
         st.session_state.selected_site = None
-    if 'page' not in st.session_state:
-        st.session_state.page = 'map'
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = "Site Map"
     
     # Sidebar navigation
     with st.sidebar:
         st.header("🗺️ Navigation")
         
-        page_options = ["Site Map", "Site Analysis", "All Sites Comparison"]
-        page = st.radio("Select Page", page_options)
-        
-        if page == "Site Map":
-            st.session_state.page = 'map'
-        elif page == "All Sites Comparison":
-            st.session_state.page = 'comparison'
-        else:
-            st.session_state.page = 'analysis'
+        # Page selection
+        page = st.selectbox(
+            "Select Page",
+            ["Site Map", "Site Analysis", "All Sites Comparison"],
+            index=["Site Map", "Site Analysis", "All Sites Comparison"].index(st.session_state.current_page)
+        )
+        st.session_state.current_page = page
         
         st.markdown("---")
         
         # Site selection for analysis
-        if st.session_state.page == 'analysis':
+        if page == "Site Analysis":
             sites = find_all_sites()
             
             if not sites:
@@ -692,7 +690,7 @@ def main():
         )
     
     # Main content area
-    if st.session_state.page == 'map':
+    if page == "Site Map":
         st.header("🗺️ Solar Assets Map")
         
         if registry_df is not None and not registry_df.empty:
@@ -717,6 +715,20 @@ def main():
             with col1:
                 st.info("💡 **Tip:** Click on any marker on the map to analyze that site, or use the dropdown below. Faded markers indicate sites without data yet.")
             
+            # Alternative: Direct navigation link
+            st.markdown("---")
+            st.markdown("### 🔗 Quick Navigation")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.session_state.selected_site:
+                    st.success(f"✅ Selected: {st.session_state.selected_site}")
+                    if st.button("📊 Go to Site Analysis →", key="nav_to_analysis"):
+                        st.session_state.current_page = "Site Analysis"
+                        st.rerun()
+                else:
+                    st.info("Select a site from the map or dropdown first")
+            
             # Create and display map
             map_fig = create_site_map(registry_df, st.session_state.selected_site)
             
@@ -734,10 +746,23 @@ def main():
                         if isinstance(clicked_site, list):
                             clicked_site = clicked_site[0]
                         st.session_state.selected_site = clicked_site
-                        st.session_state.page = 'analysis'
+                        st.session_state.current_page = "Site Analysis"
                         st.rerun()
                 except Exception as e:
                     st.error(f"Error selecting site: {str(e)}")
+            
+            # Alternative: Direct navigation section
+            if st.session_state.selected_site:
+                st.success(f"✅ Selected Site: **{st.session_state.selected_site}**")
+                col1, col2, col3 = st.columns([1, 1, 2])
+                with col2:
+                    if st.button("📊 Analyze This Site →", key="nav_to_analysis_main", use_container_width=True):
+                        st.session_state.current_page = "Site Analysis"
+                        st.rerun()
+                
+                # Alternative method - direct link style
+                st.markdown("---")
+                st.markdown("👆 **Click the button above** or **select 'Site Analysis' from the sidebar** to analyze this site.")
             
             # Alternative site selection dropdown
             st.markdown("---")
@@ -755,7 +780,7 @@ def main():
                 
                 if selected_from_dropdown and selected_from_dropdown != '':
                     st.session_state.selected_site = selected_from_dropdown
-                    st.session_state.page = 'analysis'
+                    st.session_state.current_page = "Site Analysis"
                     st.rerun()
             
             # Show site cards below map
@@ -794,14 +819,14 @@ def main():
                         if has_data:
                             if st.button(f"Analyze {site['site_name']}", key=f"btn_{site['plant_code']}"):
                                 st.session_state.selected_site = site['site_name']
-                                st.session_state.page = 'analysis'
+                                st.session_state.current_page = "Site Analysis"
                                 st.rerun()
                         else:
                             st.warning("No data available for this site")
         else:
             st.error("No site registry data found. Please ensure 'site_registry.csv' exists in the root directory.")
     
-    elif st.session_state.page == 'comparison':
+    elif page == "All Sites Comparison":
         st.header("📊 All Sites Comparison")
         with st.spinner("Creating comparison plot..."):
             fig = plot_comparison_all_sites()
@@ -840,7 +865,7 @@ def main():
             else:
                 st.error("No data available for comparison")
     
-    else:  # analysis page
+    else:  # Site Analysis page
         if st.session_state.selected_site:
             # Load data for selected site
             df, year_cols = load_site_data(st.session_state.selected_site)
