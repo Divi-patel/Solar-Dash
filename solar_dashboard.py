@@ -12,6 +12,7 @@ except ImportError:
 import matplotlib.patches as mpatches
 import matplotlib.ticker as ticker
 import plotly.graph_objects as go
+import plotly.express as px
 
 # Set page config
 st.set_page_config(
@@ -37,8 +38,29 @@ st.markdown("""
     h2 {
         color: #2E7D32;
     }
+    .site-card {
+        background-color: #f0f8f0;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+        border-left: 4px solid #2E7D32;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+@st.cache_data
+def load_site_registry():
+    """Load site registry data"""
+    registry_path = Path('site_registry.csv')
+    if registry_path.exists():
+        df = pd.read_csv(registry_path)
+        # Clean column names and convert capacity to numeric
+        df['dc_capacity_mw'] = pd.to_numeric(df['dc_capacity_mw'], errors='coerce')
+        df['ac_capacity_mw'] = pd.to_numeric(df['ac_capacity_mw'], errors='coerce')
+        df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+        df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        return df
+    return None
 
 @st.cache_data
 def find_all_sites():
@@ -65,6 +87,102 @@ def load_site_data(site_name):
         year_cols = [col for col in df.columns if str(col).isdigit()]
         return df, year_cols
     return None, []
+
+def create_site_map(registry_df, selected_site=None):
+    """Create interactive map of all solar sites"""
+    # Filter out any rows with invalid coordinates
+    map_df = registry_df.dropna(subset=['latitude', 'longitude'])
+    
+    # Create hover text
+    map_df['hover_text'] = (
+        '<b>' + map_df['site_name'] + '</b><br>' +
+        'State: ' + map_df['state'] + '<br>' +
+        'County: ' + map_df['county'] + '<br>' +
+        'DC Capacity: ' + map_df['dc_capacity_mw'].round(1).astype(str) + ' MW<br>' +
+        'AC Capacity: ' + map_df['ac_capacity_mw'].round(1).astype(str) + ' MW<br>' +
+        'System: ' + map_df['system_type'].str.replace('_', ' ').str.title() + '<br>' +
+        'Start: ' + map_df['start_month'].astype(str) + ' ' + map_df['start_year'].astype(str)
+    )
+    
+    # Create size based on DC capacity (scaled for visibility)
+    map_df['marker_size'] = np.sqrt(map_df['dc_capacity_mw']) * 5 + 10
+    
+    # Color by system type
+    color_map = {
+        'fixed': '#2E7D32',  # Dark green
+        'single_axis_tracking': '#4472C4'  # Blue
+    }
+    map_df['color'] = map_df['system_type'].map(color_map).fillna('#888888')
+    
+    # Create the map
+    fig = go.Figure()
+    
+    # Add markers for each system type
+    for system_type, color in color_map.items():
+        df_filtered = map_df[map_df['system_type'] == system_type]
+        if len(df_filtered) > 0:
+            fig.add_trace(go.Scattermapbox(
+                lat=df_filtered['latitude'],
+                lon=df_filtered['longitude'],
+                mode='markers',
+                marker=dict(
+                    size=df_filtered['marker_size'],
+                    color=color,
+                    opacity=0.8,
+                    sizemode='diameter'
+                ),
+                text=df_filtered['hover_text'],
+                hoverinfo='text',
+                name=system_type.replace('_', ' ').title(),
+                customdata=df_filtered['site_name']
+            ))
+    
+    # Highlight selected site if any
+    if selected_site and selected_site in map_df['site_name'].values:
+        selected = map_df[map_df['site_name'] == selected_site].iloc[0]
+        fig.add_trace(go.Scattermapbox(
+            lat=[selected['latitude']],
+            lon=[selected['longitude']],
+            mode='markers',
+            marker=dict(
+                size=selected['marker_size'] + 10,
+                color='red',
+                opacity=1,
+                sizemode='diameter'
+            ),
+            text=f"<b>SELECTED: {selected['site_name']}</b>",
+            hoverinfo='text',
+            showlegend=False
+        ))
+    
+    # Set map layout
+    fig.update_layout(
+        mapbox=dict(
+            style='open-street-map',
+            center=dict(
+                lat=map_df['latitude'].mean(),
+                lon=map_df['longitude'].mean()
+            ),
+            zoom=4 if len(map_df) > 1 else 8
+        ),
+        height=600,
+        margin={"r":0,"t":30,"l":0,"b":0},
+        title=dict(
+            text="Solar Assets Map - Click a site to analyze",
+            x=0.5,
+            xanchor='center'
+        ),
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01,
+            bgcolor="rgba(255,255,255,0.8)"
+        ),
+        hovermode='closest'
+    )
+    
+    return fig
 
 def plot_monthly_generation(site_name, df, year_cols):
     """Create monthly generation plot with confidence bands"""
@@ -486,26 +604,56 @@ def main():
     st.title("☀️ Solar Generation Dashboard")
     st.markdown("---")
     
-    # Sidebar
+    # Load site registry
+    registry_df = load_site_registry()
+    
+    # Initialize session state
+    if 'selected_site' not in st.session_state:
+        st.session_state.selected_site = None
+    if 'page' not in st.session_state:
+        st.session_state.page = 'map'
+    
+    # Sidebar navigation
     with st.sidebar:
-        st.header("📊 Visualization Settings")
+        st.header("🗺️ Navigation")
         
-        # Find all sites
-        sites = find_all_sites()
+        page_options = ["Site Map", "Site Analysis", "All Sites Comparison"]
+        page = st.radio("Select Page", page_options)
         
-        if not sites:
-            st.error("No solar sites found in the Simulation folder!")
-            return
+        if page == "Site Map":
+            st.session_state.page = 'map'
+        elif page == "All Sites Comparison":
+            st.session_state.page = 'comparison'
+        else:
+            st.session_state.page = 'analysis'
         
-        # Site selection
-        selected_site = st.selectbox(
-            "Select Solar Asset",
-            options=["All Sites Comparison"] + sites,
-            help="Choose a specific site or view all sites comparison"
-        )
+        st.markdown("---")
         
-        # Plot type selection
-        if selected_site != "All Sites Comparison":
+        # Site selection for analysis
+        if st.session_state.page == 'analysis':
+            sites = find_all_sites()
+            
+            if not sites:
+                st.error("No solar sites found in the Simulation folder!")
+                return
+            
+            # Use the selected site from map if available
+            if st.session_state.selected_site and st.session_state.selected_site in sites:
+                default_index = sites.index(st.session_state.selected_site)
+            else:
+                default_index = 0
+            
+            selected_site = st.selectbox(
+                "Select Solar Asset",
+                options=sites,
+                index=default_index,
+                help="Choose a site to analyze"
+            )
+            
+            # Update session state
+            st.session_state.selected_site = selected_site
+            
+            # Plot type selection
             plot_options = [
                 "Monthly Generation Forecast",
                 "Interactive Plot (Plotly)"
@@ -523,36 +671,155 @@ def main():
         
         # Information section
         st.info(
-            "**About the Visualizations:**\n\n"
-            "📈 **Monthly Generation Forecast**: Shows historical data with mean, "
-            "confidence bands, and percentiles\n\n"
-            "🎨 **Enhanced Distribution**: Displays probability distributions "
-            "with gradient shading for each month\n\n"
-            "🔄 **Interactive Plot**: Allows zooming and hover details"
+            "**Navigation Guide:**\n\n"
+            "🗺️ **Site Map**: Interactive map of all solar assets\n\n"
+            "📊 **Site Analysis**: Detailed analysis for individual sites\n\n"
+            "📈 **All Sites Comparison**: Compare generation across all sites"
         )
     
     # Main content area
-    col1, col2, col3 = st.columns([1, 6, 1])
-    
-    with col2:
-        if selected_site == "All Sites Comparison":
-            st.header("📊 All Sites Comparison")
-            with st.spinner("Creating comparison plot..."):
-                fig = plot_comparison_all_sites()
-                if fig:
-                    st.pyplot(fig)
-                else:
-                    st.error("No data available for comparison")
+    if st.session_state.page == 'map':
+        st.header("🗺️ Solar Assets Map")
+        
+        if registry_df is not None and not registry_df.empty:
+            # Show map stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Sites", len(registry_df))
+            with col2:
+                total_dc = registry_df['dc_capacity_mw'].sum()
+                st.metric("Total DC Capacity", f"{total_dc:,.0f} MW")
+            with col3:
+                total_ac = registry_df['ac_capacity_mw'].sum()
+                st.metric("Total AC Capacity", f"{total_ac:,.0f} MW")
+            with col4:
+                states = registry_df['state'].nunique()
+                st.metric("States Covered", states)
+            
+            st.markdown("---")
+            
+            # Create and display map
+            map_fig = create_site_map(registry_df, st.session_state.selected_site)
+            
+            # Handle map clicks
+            clicked_point = st.plotly_chart(map_fig, use_container_width=True, on_select="rerun")
+            
+            # Check if a point was clicked
+            if clicked_point and clicked_point['selection']['points']:
+                clicked_site = clicked_point['selection']['points'][0]['customdata']
+                st.session_state.selected_site = clicked_site
+                st.session_state.page = 'analysis'
+                st.rerun()
+            
+            # Show site cards below map
+            st.markdown("---")
+            st.subheader("📋 Site Directory")
+            
+            # Filter by state
+            states = ['All'] + sorted(registry_df['state'].unique().tolist())
+            selected_state = st.selectbox("Filter by State", states)
+            
+            # Filter dataframe
+            if selected_state != 'All':
+                filtered_df = registry_df[registry_df['state'] == selected_state]
+            else:
+                filtered_df = registry_df
+            
+            # Display site cards in columns
+            cols = st.columns(2)
+            for idx, (_, site) in enumerate(filtered_df.iterrows()):
+                with cols[idx % 2]:
+                    with st.container():
+                        st.markdown(f"""
+                        <div class="site-card">
+                            <h4>{site['site_name']}</h4>
+                            <p><strong>Location:</strong> {site['county']}, {site['state']}<br>
+                            <strong>Capacity:</strong> {site['dc_capacity_mw']:.1f} MW DC / {site['ac_capacity_mw']:.1f} MW AC<br>
+                            <strong>System:</strong> {site['system_type'].replace('_', ' ').title()}<br>
+                            <strong>Started:</strong> {site['start_month']} {site['start_year']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if st.button(f"Analyze {site['site_name']}", key=f"btn_{site['plant_code']}"):
+                            st.session_state.selected_site = site['site_name']
+                            st.session_state.page = 'analysis'
+                            st.rerun()
         else:
+            st.error("No site registry data found. Please ensure 'site_registry.csv' exists in the root directory.")
+    
+    elif st.session_state.page == 'comparison':
+        st.header("📊 All Sites Comparison")
+        with st.spinner("Creating comparison plot..."):
+            fig = plot_comparison_all_sites()
+            if fig:
+                st.pyplot(fig)
+                
+                # Show comparison statistics
+                st.markdown("---")
+                st.subheader("📈 Comparison Statistics")
+                
+                sites = find_all_sites()
+                comparison_data = []
+                
+                for site_name in sites:
+                    df, year_cols = load_site_data(site_name)
+                    if df is not None and year_cols:
+                        annual_mean = df[year_cols].sum().mean()
+                        annual_std = df[year_cols].sum().std()
+                        comparison_data.append({
+                            'Site': site_name,
+                            'Mean Annual Generation (MWh)': annual_mean,
+                            'Std Dev (MWh)': annual_std,
+                            'CV%': (annual_std / annual_mean * 100) if annual_mean > 0 else 0
+                        })
+                
+                if comparison_data:
+                    comp_df = pd.DataFrame(comparison_data)
+                    comp_df = comp_df.sort_values('Mean Annual Generation (MWh)', ascending=False)
+                    
+                    # Format numbers
+                    comp_df['Mean Annual Generation (MWh)'] = comp_df['Mean Annual Generation (MWh)'].round(0)
+                    comp_df['Std Dev (MWh)'] = comp_df['Std Dev (MWh)'].round(0)
+                    comp_df['CV%'] = comp_df['CV%'].round(1)
+                    
+                    st.dataframe(comp_df, use_container_width=True, hide_index=True)
+            else:
+                st.error("No data available for comparison")
+    
+    else:  # analysis page
+        if st.session_state.selected_site:
             # Load data for selected site
-            df, year_cols = load_site_data(selected_site)
+            df, year_cols = load_site_data(st.session_state.selected_site)
             
             if df is None or not year_cols:
-                st.error(f"No data found for {selected_site}")
+                st.error(f"No data found for {st.session_state.selected_site}")
                 return
             
-            # Display site info
-            st.header(f"📍 {selected_site}")
+            # Display site info with registry data if available
+            st.header(f"📍 {st.session_state.selected_site}")
+            
+            # Show site details from registry if available
+            if registry_df is not None and st.session_state.selected_site in registry_df['site_name'].values:
+                site_info = registry_df[registry_df['site_name'] == st.session_state.selected_site].iloc[0]
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"""
+                    **Location:** {site_info['county']}, {site_info['state']}  
+                    **Coordinates:** {site_info['latitude']:.4f}, {site_info['longitude']:.4f}
+                    """)
+                with col2:
+                    st.markdown(f"""
+                    **DC Capacity:** {site_info['dc_capacity_mw']:.1f} MW  
+                    **AC Capacity:** {site_info['ac_capacity_mw']:.1f} MW
+                    """)
+                with col3:
+                    st.markdown(f"""
+                    **System Type:** {site_info['system_type'].replace('_', ' ').title()}  
+                    **Started:** {site_info['start_month']} {site_info['start_year']}
+                    """)
+                
+                st.markdown("---")
             
             # Show basic statistics
             col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
@@ -576,17 +843,17 @@ def main():
             # Create selected visualization
             if plot_type == "Monthly Generation Forecast":
                 with st.spinner("Creating forecast plot..."):
-                    fig = plot_monthly_generation(selected_site, df, year_cols)
+                    fig = plot_monthly_generation(st.session_state.selected_site, df, year_cols)
                     st.pyplot(fig)
                     
             elif plot_type == "Enhanced Distribution Plot":
                 with st.spinner("Creating distribution plot..."):
-                    fig = plot_enhanced_distributions(selected_site, df, year_cols)
+                    fig = plot_enhanced_distributions(st.session_state.selected_site, df, year_cols)
                     st.pyplot(fig)
                     
             elif plot_type == "Interactive Plot (Plotly)":
                 with st.spinner("Creating interactive plot..."):
-                    fig = create_plotly_interactive(selected_site, df, year_cols)
+                    fig = create_plotly_interactive(st.session_state.selected_site, df, year_cols)
                     st.plotly_chart(fig, use_container_width=True)
             
             # Add download option for data
@@ -596,7 +863,7 @@ def main():
                 st.download_button(
                     label="Download CSV",
                     data=csv,
-                    file_name=f"{selected_site}_monthly_data.csv",
+                    file_name=f"{st.session_state.selected_site}_monthly_data.csv",
                     mime="text/csv"
                 )
             
@@ -671,6 +938,8 @@ def main():
                     with col3:
                         yearly_std = yearly_df['Annual Total'].std()
                         st.metric("Yearly Std Dev", f"{yearly_std:,.0f} MWh")
+        else:
+            st.info("Please select a site from the map or sidebar to begin analysis.")
 
 if __name__ == "__main__":
     main()
