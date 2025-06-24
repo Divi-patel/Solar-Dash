@@ -3,7 +3,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-from scipy.stats import gaussian_kde
+try:
+    from scipy.stats import gaussian_kde
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    print("Warning: scipy not available, distribution plots will be disabled")
 import matplotlib.patches as mpatches
 import matplotlib.ticker as ticker
 import plotly.graph_objects as go
@@ -150,6 +155,12 @@ def plot_monthly_generation(site_name, df, year_cols):
 
 def plot_enhanced_distributions(site_name, df, year_cols):
     """Create enhanced distribution plot with gradient shading"""
+    if not HAS_SCIPY:
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.text(0.5, 0.5, 'Distribution plot requires scipy package\nPlease install: pip install scipy', 
+                transform=ax.transAxes, ha='center', va='center', fontsize=14)
+        ax.set_title(f'Enhanced Monthly Generation Distributions - {site_name}', fontsize=18)
+        return fig
     # Ensure month names exist
     if 'month_name' not in df.columns:
         month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
@@ -495,13 +506,16 @@ def main():
         
         # Plot type selection
         if selected_site != "All Sites Comparison":
+            plot_options = [
+                "Monthly Generation Forecast",
+                "Interactive Plot (Plotly)"
+            ]
+            if HAS_SCIPY:
+                plot_options.insert(1, "Enhanced Distribution Plot")
+            
             plot_type = st.selectbox(
                 "Select Visualization Type",
-                options=[
-                    "Monthly Generation Forecast",
-                    "Enhanced Distribution Plot",
-                    "Interactive Plot (Plotly)"
-                ],
+                options=plot_options,
                 help="Choose the type of visualization"
             )
         
@@ -585,6 +599,78 @@ def main():
                     file_name=f"{selected_site}_monthly_data.csv",
                     mime="text/csv"
                 )
+            
+            # Add data table view
+            st.markdown("---")
+            with st.expander("📊 View Data Table"):
+                # Create tabs for different views
+                tab1, tab2, tab3 = st.tabs(["Full Data", "Statistical Summary", "Yearly Comparison"])
+                
+                with tab1:
+                    st.subheader("Full Monthly Time Series Data")
+                    # Show the dataframe with month names as index for better readability
+                    display_df = df.set_index('month_name')
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        height=400
+                    )
+                
+                with tab2:
+                    st.subheader("Statistical Summary")
+                    # Calculate statistics for each month
+                    stats_df = pd.DataFrame({
+                        'Month': df['month_name'],
+                        'Mean': df[year_cols].mean(axis=1).round(1),
+                        'Std Dev': df[year_cols].std(axis=1).round(1),
+                        'Min': df[year_cols].min(axis=1).round(1),
+                        'P25': df[year_cols].quantile(0.25, axis=1).round(1),
+                        'Median': df[year_cols].quantile(0.50, axis=1).round(1),
+                        'P75': df[year_cols].quantile(0.75, axis=1).round(1),
+                        'Max': df[year_cols].max(axis=1).round(1),
+                        'CV%': (df[year_cols].std(axis=1) / df[year_cols].mean(axis=1) * 100).round(1)
+                    })
+                    
+                    st.dataframe(
+                        stats_df.set_index('Month'),
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # Add explanation
+                    st.caption("**CV%** = Coefficient of Variation (Std Dev / Mean × 100) - shows relative variability")
+                
+                with tab3:
+                    st.subheader("Year-over-Year Comparison")
+                    # Transpose for yearly view
+                    yearly_df = df[['month_name'] + year_cols].set_index('month_name').T
+                    yearly_df.index.name = 'Year'
+                    
+                    # Calculate yearly totals
+                    yearly_df['Annual Total'] = yearly_df.sum(axis=1).round(0)
+                    
+                    # Show recent years first
+                    st.dataframe(
+                        yearly_df.iloc[::-1],  # Reverse to show recent years first
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # Add yearly statistics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        best_year = yearly_df['Annual Total'].idxmax()
+                        best_value = yearly_df['Annual Total'].max()
+                        st.metric("Best Year", f"{best_year}", f"{best_value:,.0f} MWh")
+                    
+                    with col2:
+                        worst_year = yearly_df['Annual Total'].idxmin()
+                        worst_value = yearly_df['Annual Total'].min()
+                        st.metric("Worst Year", f"{worst_year}", f"{worst_value:,.0f} MWh")
+                    
+                    with col3:
+                        yearly_std = yearly_df['Annual Total'].std()
+                        st.metric("Yearly Std Dev", f"{yearly_std:,.0f} MWh")
 
 if __name__ == "__main__":
     main()
