@@ -12,7 +12,6 @@ except ImportError:
 import matplotlib.patches as mpatches
 import matplotlib.ticker as ticker
 import plotly.graph_objects as go
-import plotly.express as px
 
 # Set page config
 st.set_page_config(
@@ -93,19 +92,26 @@ def create_site_map(registry_df, selected_site=None):
     # Filter out any rows with invalid coordinates
     map_df = registry_df.dropna(subset=['latitude', 'longitude'])
     
+    # Get sites with data
+    sites_with_data = find_all_sites()
+    
     # Create hover text
-    map_df['hover_text'] = (
-        '<b>' + map_df['site_name'] + '</b><br>' +
-        'State: ' + map_df['state'] + '<br>' +
-        'County: ' + map_df['county'] + '<br>' +
-        'DC Capacity: ' + map_df['dc_capacity_mw'].round(1).astype(str) + ' MW<br>' +
-        'AC Capacity: ' + map_df['ac_capacity_mw'].round(1).astype(str) + ' MW<br>' +
-        'System: ' + map_df['system_type'].str.replace('_', ' ').str.title() + '<br>' +
-        'Start: ' + map_df['start_month'].astype(str) + ' ' + map_df['start_year'].astype(str)
-    )
+    map_df['hover_text'] = map_df.apply(lambda row: (
+        '<b>' + row['site_name'] + '</b><br>' +
+        'State: ' + row['state'] + '<br>' +
+        'County: ' + row['county'] + '<br>' +
+        'DC Capacity: ' + str(round(row['dc_capacity_mw'], 1)) + ' MW<br>' +
+        'AC Capacity: ' + str(round(row['ac_capacity_mw'], 1)) + ' MW<br>' +
+        'System: ' + row['system_type'].replace('_', ' ').title() + '<br>' +
+        'Start: ' + str(row['start_month']) + ' ' + str(row['start_year']) + '<br>' +
+        ('<b>Click to analyze</b>' if row['site_name'] in sites_with_data else '<i>No data available</i>')
+    ), axis=1)
     
     # Create size based on DC capacity (scaled for visibility)
     map_df['marker_size'] = np.sqrt(map_df['dc_capacity_mw']) * 5 + 10
+    
+    # Check which sites have data
+    map_df['has_data'] = map_df['site_name'].isin(sites_with_data)
     
     # Color by system type
     color_map = {
@@ -114,6 +120,9 @@ def create_site_map(registry_df, selected_site=None):
     }
     map_df['color'] = map_df['system_type'].map(color_map).fillna('#888888')
     
+    # Set opacity based on data availability
+    map_df['opacity'] = map_df['has_data'].map({True: 0.8, False: 0.3})
+    
     # Create the map
     fig = go.Figure()
     
@@ -121,21 +130,26 @@ def create_site_map(registry_df, selected_site=None):
     for system_type, color in color_map.items():
         df_filtered = map_df[map_df['system_type'] == system_type]
         if len(df_filtered) > 0:
-            fig.add_trace(go.Scattermapbox(
-                lat=df_filtered['latitude'],
-                lon=df_filtered['longitude'],
-                mode='markers',
-                marker=dict(
-                    size=df_filtered['marker_size'],
-                    color=color,
-                    opacity=0.8,
-                    sizemode='diameter'
-                ),
-                text=df_filtered['hover_text'],
-                hoverinfo='text',
-                name=system_type.replace('_', ' ').title(),
-                customdata=df_filtered['site_name']
-            ))
+            # Separate sites with and without data for different opacity
+            for has_data in [True, False]:
+                df_subset = df_filtered[df_filtered['has_data'] == has_data]
+                if len(df_subset) > 0:
+                    fig.add_trace(go.Scattermapbox(
+                        lat=df_subset['latitude'],
+                        lon=df_subset['longitude'],
+                        mode='markers',
+                        marker=dict(
+                            size=df_subset['marker_size'],
+                            color=color,
+                            opacity=0.8 if has_data else 0.3,
+                            sizemode='diameter'
+                        ),
+                        text=df_subset['hover_text'],
+                        hoverinfo='text',
+                        name=f"{system_type.replace('_', ' ').title()}{'' if has_data else ' (No Data)'}",
+                        customdata=df_subset['site_name'],
+                        showlegend=has_data  # Only show in legend if has data
+                    ))
     
     # Highlight selected site if any
     if selected_site and selected_site in map_df['site_name'].values:
@@ -698,18 +712,51 @@ def main():
             
             st.markdown("---")
             
+            # Add instructions
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.info("💡 **Tip:** Click on any marker on the map to analyze that site, or use the dropdown below. Faded markers indicate sites without data yet.")
+            
             # Create and display map
             map_fig = create_site_map(registry_df, st.session_state.selected_site)
             
             # Handle map clicks
-            clicked_point = st.plotly_chart(map_fig, use_container_width=True, on_select="rerun")
+            clicked_point = st.plotly_chart(map_fig, use_container_width=True, on_select="rerun", key="site_map")
             
             # Check if a point was clicked
-            if clicked_point and clicked_point['selection']['points']:
-                clicked_site = clicked_point['selection']['points'][0]['customdata']
-                st.session_state.selected_site = clicked_site
-                st.session_state.page = 'analysis'
-                st.rerun()
+            if clicked_point and 'selection' in clicked_point and clicked_point['selection']['points']:
+                try:
+                    # Get the clicked point data
+                    point_data = clicked_point['selection']['points'][0]
+                    # The customdata contains the site name
+                    if 'customdata' in point_data:
+                        clicked_site = point_data['customdata']
+                        if isinstance(clicked_site, list):
+                            clicked_site = clicked_site[0]
+                        st.session_state.selected_site = clicked_site
+                        st.session_state.page = 'analysis'
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error selecting site: {str(e)}")
+            
+            # Alternative site selection dropdown
+            st.markdown("---")
+            col1, col2, col3 = st.columns([2, 1, 2])
+            with col2:
+                sites_in_registry = registry_df['site_name'].tolist()
+                sites_with_data = find_all_sites()
+                available_sites = [site for site in sites_with_data if site in sites_in_registry or True]  # Show all sites with data
+                
+                selected_from_dropdown = st.selectbox(
+                    "Or select a site:",
+                    options=[''] + available_sites,
+                    key="map_site_selector"
+                )
+                
+                if selected_from_dropdown and selected_from_dropdown != '':
+                    st.session_state.selected_site = selected_from_dropdown
+                    st.session_state.page = 'analysis'
+                    st.rerun()
             
             # Show site cards below map
             st.markdown("---")
@@ -726,10 +773,14 @@ def main():
                 filtered_df = registry_df
             
             # Display site cards in columns
+            sites_with_data = find_all_sites()
             cols = st.columns(2)
             for idx, (_, site) in enumerate(filtered_df.iterrows()):
                 with cols[idx % 2]:
                     with st.container():
+                        # Check if this site has data
+                        has_data = site['site_name'] in sites_with_data
+                        
                         st.markdown(f"""
                         <div class="site-card">
                             <h4>{site['site_name']}</h4>
@@ -740,10 +791,13 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        if st.button(f"Analyze {site['site_name']}", key=f"btn_{site['plant_code']}"):
-                            st.session_state.selected_site = site['site_name']
-                            st.session_state.page = 'analysis'
-                            st.rerun()
+                        if has_data:
+                            if st.button(f"Analyze {site['site_name']}", key=f"btn_{site['plant_code']}"):
+                                st.session_state.selected_site = site['site_name']
+                                st.session_state.page = 'analysis'
+                                st.rerun()
+                        else:
+                            st.warning("No data available for this site")
         else:
             st.error("No site registry data found. Please ensure 'site_registry.csv' exists in the root directory.")
     
@@ -869,7 +923,7 @@ def main():
             
             # Add data table view
             st.markdown("---")
-            with st.expander("📊 View Data Table"):
+            with st.expander("📊 View Data Table", expanded=True):
                 # Create tabs for different views
                 tab1, tab2, tab3 = st.tabs(["Full Data", "Statistical Summary", "Yearly Comparison"])
                 
